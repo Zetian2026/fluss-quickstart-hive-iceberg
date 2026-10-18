@@ -1,0 +1,238 @@
+services:
+  # ---------- S3-compatible object storage ----------
+  rustfs:
+    image: rustfs/rustfs:latest
+    ports:
+      - "9000:9000"   # S3 API
+      - "9002:9001"   # console (host 9001 is the Iceberg REST API)
+    environment:
+      - RUSTFS_ACCESS_KEY=rustfsadmin
+      - RUSTFS_SECRET_KEY=rustfsadmin
+      - RUSTFS_CONSOLE_ENABLE=true
+    volumes:
+      - rustfs-data:/data
+    command: /data
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 9000 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  rustfs-init:
+    image: rustfs/rc:v0.1.36
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      until rc alias set rustfs http://rustfs:9000 rustfsadmin rustfsadmin; do
+        echo 'Waiting for RustFS...';
+        sleep 1;
+      done;
+      rc mb --ignore-existing rustfs/fluss;
+      rc mb --ignore-existing rustfs/warehouse;
+      "
+
+  # ---------- Hive Metastore backend DB ----------
+  postgres:
+    image: postgres:17
+    environment:
+      - POSTGRES_USER=hive
+      - POSTGRES_PASSWORD=hive
+      - POSTGRES_DB=metastore
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # ---------- Hive Metastore 4.1.0 + Iceberg REST Catalog ----------
+  hive-metastore:
+    image: apache/hive:standalone-metastore-4.1.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rustfs-init:
+        condition: service_completed_successfully
+    ports:
+      - "9083:9083"   # Thrift (only for schematool/debugging; clients use REST)
+      - "9001:9001"   # Iceberg REST Catalog API
+    environment:
+      - DB_DRIVER=postgres
+      - SERVICE_OPTS=-Xmx2G
+      # hadoop-aws + AWS SDK v2 are shipped in the image but NOT on the default classpath
+      - HADOOP_CLASSPATH=/opt/hadoop/share/hadoop/tools/lib/hadoop-aws-3.4.1.jar:/opt/hadoop/share/hadoop/tools/lib/bundle-2.24.6.jar
+    volumes:
+      - ./conf/hive/core-site.xml:/opt/hive/conf/core-site.xml:ro
+      - ./conf/hive/metastore-site.xml:/opt/hive/conf/metastore-site.xml:ro
+      - ./lib/postgresql-42.7.4.jar:/opt/hive/lib/postgresql-42.7.4.jar:ro
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9001' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  # ---------- Fluss cluster (lake catalog = HMS Iceberg REST) ----------
+  coordinator-server:
+    image: apache/fluss:1.0.0
+    command: coordinatorServer
+    depends_on:
+      zookeeper:
+        condition: service_started
+      rustfs-init:
+        condition: service_completed_successfully
+      hive-metastore:
+        condition: service_healthy
+    environment:
+      - |
+        FLUSS_PROPERTIES=
+        zookeeper.address: zookeeper:2181
+        bind.listeners: FLUSS://coordinator-server:9123
+        remote.data.dir: s3://fluss/remote-data
+        s3.endpoint: http://rustfs:9000
+        s3.access-key: rustfsadmin
+        s3.secret-key: rustfsadmin
+        s3.region: us-east-1
+        s3.path-style-access: true
+        s3.assumed.role.arn: arn:aws:iam::000000000000:role/rustfsadmin
+        s3.assumed.role.sts.endpoint: http://rustfs:9000
+        datalake.enabled: true
+        datalake.format: iceberg
+        datalake.iceberg.type: rest
+        datalake.iceberg.uri: http://hive-metastore:9001/iceberg
+        datalake.iceberg.warehouse: s3://warehouse
+        datalake.iceberg.io-impl: org.apache.iceberg.aws.s3.S3FileIO
+        datalake.iceberg.s3.endpoint: http://rustfs:9000
+        datalake.iceberg.s3.access-key-id: rustfsadmin
+        datalake.iceberg.s3.secret-access-key: rustfsadmin
+        datalake.iceberg.s3.path-style-access: true
+        datalake.iceberg.client.region: us-east-1
+    volumes:
+      - ./lib/iceberg-aws-1.10.1.jar:/opt/fluss/plugins/iceberg/iceberg-aws-1.10.1.jar:ro
+      - ./lib/iceberg-aws-bundle-1.10.1.jar:/opt/fluss/plugins/iceberg/iceberg-aws-bundle-1.10.1.jar:ro
+
+  tablet-server:
+    image: apache/fluss:1.0.0
+    command: tabletServer
+    depends_on:
+      - coordinator-server
+    environment:
+      - |
+        FLUSS_PROPERTIES=
+        zookeeper.address: zookeeper:2181
+        bind.listeners: FLUSS://tablet-server:9123
+        data.dir: /tmp/fluss/data
+        remote.data.dir: s3://fluss/remote-data
+        s3.endpoint: http://rustfs:9000
+        s3.access-key: rustfsadmin
+        s3.secret-key: rustfsadmin
+        s3.region: us-east-1
+        s3.path-style-access: true
+        s3.assumed.role.arn: arn:aws:iam::000000000000:role/rustfsadmin
+        s3.assumed.role.sts.endpoint: http://rustfs:9000
+        datalake.enabled: true
+        datalake.format: iceberg
+        datalake.iceberg.type: rest
+        datalake.iceberg.uri: http://hive-metastore:9001/iceberg
+        datalake.iceberg.warehouse: s3://warehouse
+        datalake.iceberg.io-impl: org.apache.iceberg.aws.s3.S3FileIO
+        datalake.iceberg.s3.endpoint: http://rustfs:9000
+        datalake.iceberg.s3.access-key-id: rustfsadmin
+        datalake.iceberg.s3.secret-access-key: rustfsadmin
+        datalake.iceberg.s3.path-style-access: true
+        datalake.iceberg.client.region: us-east-1
+    volumes:
+      - ./lib/iceberg-aws-1.10.1.jar:/opt/fluss/plugins/iceberg/iceberg-aws-1.10.1.jar:ro
+      - ./lib/iceberg-aws-bundle-1.10.1.jar:/opt/fluss/plugins/iceberg/iceberg-aws-bundle-1.10.1.jar:ro
+
+  zookeeper:
+    restart: always
+    image: zookeeper:3.9.2
+
+  # ---------- Flink cluster (Iceberg REST client + Fluss connector) ----------
+  jobmanager:
+    image: apache/fluss-quickstart-flink:1.20-1.0.0
+    ports:
+      - "8083:8081"
+    entrypoint: ["/opt/flink/init_iceberg.sh"]
+    command: ["jobmanager"]
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8081' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  taskmanager:
+    image: apache/fluss-quickstart-flink:1.20-1.0.0
+    depends_on:
+      - jobmanager
+    entrypoint: ["/opt/flink/init_iceberg.sh"]
+    command: ["taskmanager"]
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: 10
+        taskmanager.memory.process.size: 2048m
+        taskmanager.memory.task.off-heap.size: 128m
+
+  # One-shot: submit the Fluss -> Iceberg tiering job, then exit.
+  tiering:
+    image: apache/fluss-quickstart-flink:1.20-1.0.0
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+      coordinator-server:
+        condition: service_started
+      hive-metastore:
+        condition: service_healthy
+    entrypoint: ["/opt/flink/init_iceberg.sh"]
+    command:
+      - bash
+      - -c
+      - |
+        /opt/flink/bin/flink run -d \
+          -c org.apache.fluss.flink.tiering.FlussLakeTieringEntrypoint \
+          /opt/flink/opt/fluss-flink-tiering-1.0.0.jar \
+          --fluss.bootstrap.servers coordinator-server:9123 \
+          --datalake.format iceberg \
+          --datalake.iceberg.type rest \
+          --datalake.iceberg.uri http://hive-metastore:9001/iceberg \
+          --datalake.iceberg.warehouse s3://warehouse \
+          --datalake.iceberg.io-impl org.apache.iceberg.aws.s3.S3FileIO \
+          --datalake.iceberg.s3.endpoint http://rustfs:9000 \
+          --datalake.iceberg.s3.access-key-id rustfsadmin \
+          --datalake.iceberg.s3.secret-access-key rustfsadmin \
+          --datalake.iceberg.s3.path-style-access true \
+          --datalake.iceberg.client.region us-east-1
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        rest.address: jobmanager
+
+  sql-client:
+    image: apache/fluss-quickstart-flink:1.20-1.0.0
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+    entrypoint: ["/opt/flink/init_iceberg.sh"]
+    command: ["/opt/flink/bin/sql-client.sh"]
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        rest.address: jobmanager
+    volumes:
+      - ./sql:/opt/sql:ro
+    stdin_open: true
+    tty: true
+
+volumes:
+  rustfs-data:
