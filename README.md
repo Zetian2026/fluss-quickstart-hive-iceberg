@@ -11,7 +11,7 @@ tiering 到 **Apache Iceberg**，元数据统一由 **Hive Metastore 4.1.0** 内
 
 ```
                     ┌──────────────────────────────┐
-   Flink SQL ────>  │ Iceberg REST Catalog (:9001) │  /iceberg/v1/...
+   Flink SQL ──────>│ Iceberg REST Catalog (:9001) │  /iceberg/v1/...
    (Flink 1.20)     │  Hive Metastore 4.1.0        │
                     │   └─ Iceberg 1.9.1 (shaded)  │
                     └───────────┬──────────────────┘
