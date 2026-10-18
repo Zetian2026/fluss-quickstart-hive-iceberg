@@ -103,7 +103,30 @@ RustFS 控制台默认也用 9001，和 Iceberg REST Catalog 撞了。
 
 ## 二、REST Catalog 访问
 
-### Q7. `POST /iceberg/v1/hive/namespaces` 返回 400 `No route for request`
+### Q7. 启动后部分容器 `Up` 但互相解析不到主机名（`bad address 'rustfs'`）
+
+**现象**：`docker compose ps` 显示 `rustfs` 是 `healthy`，但 `rustfs-init` 一直循环
+`Waiting for RustFS...`，日志里是 `Network dispatch error ... HttpTimeoutError`；
+`docker network inspect` 看到某些容器**没有加入任何网络**。
+
+**原因**：上一次启动时端口占用（如 `:9000 already allocated`）导致部分容器创建失败，
+留下的半成品容器在某些 Docker 版本下会出现网络未附加的状态。
+
+**解决**：彻底清理后重启，不要只 `restart`：
+
+```bash
+docker compose down -v --remove-orphans
+docker ps -a --filter "name=fluss-quickstart"   # 确认无残留
+docker compose up -d
+```
+
+排查时可用下面这条确认某个容器到底在不在网络上：
+
+```bash
+docker inspect <container> --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}'
+```
+
+### Q8. `POST /iceberg/v1/hive/namespaces` 返回 400 `No route for request`
 
 REST 路径里**没有 warehouse 前缀**。不管 `warehouse` 配的是什么，
 endpoint 都是：
@@ -122,7 +145,7 @@ curl http://localhost:9001/iceberg/v1/namespaces
 curl http://localhost:9001/iceberg/v1/hive/namespaces
 ```
 
-### Q8. 客户端 `uri` 应该填到哪一层？
+### Q9. 客户端 `uri` 应该填到哪一层？
 
 填到 `/iceberg`，**不要**带 `/v1`：
 
@@ -130,7 +153,7 @@ curl http://localhost:9001/iceberg/v1/hive/namespaces
 'uri' = 'http://hive-metastore:9001/iceberg'
 ```
 
-### Q9. 本地开发怎么关掉 REST Catalog 的鉴权？
+### Q10. 本地开发怎么关掉 REST Catalog 的鉴权？
 
 ```xml
 <property>
@@ -144,7 +167,7 @@ curl http://localhost:9001/iceberg/v1/hive/namespaces
 
 > 生产环境不要用 `none`，应配置 Kerberos 或 OAuth。
 
-### Q10. 客户端还需要 Hive 依赖吗？
+### Q11. 客户端还需要 Hive 依赖吗？
 
 不需要。`catalog-type=rest` 时 Flink 只依赖 `iceberg-flink-runtime` 里的
 REST 客户端 + `S3FileIO`，不需要 `HiveCatalog`，也不需要连 9083。
@@ -154,7 +177,7 @@ REST 客户端 + `S3FileIO`，不需要 `HiveCatalog`，也不需要连 9083。
 
 ## 三、Fluss 集成
 
-### Q11. Fluss 报 `No LakeStoragePlugin can be found for datalake format: iceberg`
+### Q12. Fluss 报 `No LakeStoragePlugin can be found for datalake format: iceberg`
 
 缺少 `fluss-lake-iceberg` 插件。`apache/fluss:1.0.0` 镜像已经内置该 jar，
 但 `S3FileIO` 还需要 AWS 依赖，必须把 `iceberg-aws-*.jar` 挂到插件目录：
@@ -165,12 +188,12 @@ volumes:
   - ./lib/iceberg-aws-bundle-1.10.1.jar:/opt/fluss/plugins/iceberg/iceberg-aws-bundle-1.10.1.jar:ro
 ```
 
-### Q12. Fluss 日志里 `Hadoop not found on classpath` 是错误吗？
+### Q13. Fluss 日志里 `Hadoop not found on classpath` 是错误吗？
 
 不是。使用 `datalake.iceberg.type=rest` + `io-impl=S3FileIO` 时不会走 Hadoop，
 这条 warning 可以忽略。
 
-### Q13. Fluss 的 Iceberg 配置项前缀是什么？
+### Q14. Fluss 的 Iceberg 配置项前缀是什么？
 
 Fluss **服务端**用 `datalake.iceberg.*`：
 
@@ -185,7 +208,7 @@ datalake.iceberg.client.region us-east-1
 
 Fluss 的 **Flink connector** 在 `CREATE CATALOG` 上用 `iceberg.` 前缀（见 Q15）。
 
-### Q14. tiering 作业报 `The bootstrap server to fluss is not configured`
+### Q15. tiering 作业报 `The bootstrap server to fluss is not configured`
 
 启动 `FlussLakeTieringEntrypoint` 时必须显式给 Fluss 地址：
 
@@ -193,7 +216,7 @@ Fluss 的 **Flink connector** 在 `CREATE CATALOG` 上用 `iceberg.` 前缀（�
 --fluss.bootstrap.servers coordinator-server:9123
 ```
 
-### Q15. Union Read 报 `SdkClientException: Unable to load credentials`
+### Q16. Union Read 报 `SdkClientException: Unable to load credentials`
 
 **原因**：Union Read 走 `LakeFlinkCatalog`，它从 **Fluss catalog 的选项**里
 按 `<format>.` 前缀提取 Iceberg 客户端配置（catalog 属性优先级高于表属性）。
@@ -219,7 +242,7 @@ CREATE CATALOG fluss_catalog WITH (
 
 （注意这里的前缀是 `iceberg.`，不是 `datalake.iceberg.`。）
 
-### Q16. 主键表批模式 Union Read 报 `lake records must instance of sorted view`
+### Q17. 主键表批模式 Union Read 报 `lake records must instance of sorted view`
 
 **这是 Fluss 1.0.0 的已知限制，不是配置问题。**
 
@@ -249,7 +272,7 @@ throw new UnsupportedOperationException(
 - 主键表改用流模式 Union Read；
 - 只需要历史数据时用 `$lake` 后缀，或直接走 Iceberg REST Catalog。
 
-### Q17. `DROP TABLE` 之后重建同名表报 `LakeTableAlreadyExistException`
+### Q18. `DROP TABLE` 之后重建同名表报 `LakeTableAlreadyExistException`
 
 **原因**：Fluss 的 `DROP TABLE` 只删 Fluss 侧的表，**不会删除 Iceberg 里的镜像表**。
 镜像表里已有数据，所以重建会被拒绝：
@@ -268,7 +291,7 @@ DROP TABLE IF EXISTS iceberg_rest.fluss.fluss_order_with_lake;
 CREATE TABLE fluss_catalog.fluss.fluss_order_with_lake (...) WITH (...);
 ```
 
-### Q18. Fluss 表建在哪个 database？
+### Q19. Fluss 表建在哪个 database？
 
 镜像表的位置由表所在的 Fluss database 决定。`fluss.fluss_order_with_lake`
 对应 Iceberg 中的 `fluss.db/fluss_order_with_lake`。用非 `fluss` 的 database 时，
@@ -278,7 +301,7 @@ Iceberg 侧也会跟着变。
 
 ## 四、Flink / SQL Client
 
-### Q19. `sql-client.sh -f` 报 `FileNotFoundException ... (Permission denied)`
+### Q20. `sql-client.sh -f` 报 `FileNotFoundException ... (Permission denied)`
 
 宿主机上创建的 `.sql` 文件默认权限可能是 `600`，容器内以其他用户运行就读不到。
 
@@ -290,7 +313,7 @@ chmod 644 sql/**/*.sql
 
 在 compose 里以 `:ro` 挂载目录也更安全。
 
-### Q20. 非交互执行查询看不到结果
+### Q21. 非交互执行查询看不到结果
 
 需要显式设置结果模式：
 
@@ -300,7 +323,7 @@ SET 'sql-client.execution.result-mode' = 'TABLEAU';
 
 仓库所有脚本都已包含这一行。
 
-### Q21. 用 `docker run` 临时起容器时报 `Connection refused`
+### Q22. 用 `docker run` 临时起容器时报 `Connection refused`
 
 必须走镜像的入口脚本并指定 `rest.address`，否则 sql-client 找不到集群：
 
@@ -315,7 +338,7 @@ docker run --rm --network fluss-quickstart-iceberg_default \
 注意 `entrypoint` 必须是 `/opt/flink/init_iceberg.sh`——它负责把 Iceberg jar 拷进
 `/opt/flink/lib/`，直接覆盖 entrypoint 会导致 Iceberg 依赖缺失。
 
-### Q22. `CREATE CATALOG` 成功但 `SHOW DATABASES` 里没有新建的库
+### Q23. `CREATE CATALOG` 成功但 `SHOW DATABASES` 里没有新建的库
 
 `USE CATALOG` 之后再建表/建库。脚本里用全限定名（`iceberg_rest.db_flink.orders`）
 也可以，但 `SHOW TABLES` 依赖当前 catalog 和 database：
@@ -330,7 +353,7 @@ SHOW TABLES;
 
 ## 五、验证与排查
 
-### Q23. 怎么确认元数据真的写进了 PostgreSQL？
+### Q24. 怎么确认元数据真的写进了 PostgreSQL？
 
 ```bash
 docker compose exec postgres psql -U hive -d metastore -c \
@@ -340,7 +363,7 @@ docker compose exec postgres psql -U hive -d metastore -c \
 注意 HMS 建的表名是**大写并带引号**的（`"DBS"`、`"TBLS"`、`"SDS"`），
 小写会提示表不存在。
 
-### Q24. 怎么确认数据文件真的写进了 RustFS？
+### Q25. 怎么确认数据文件真的写进了 RustFS？
 
 ```bash
 docker compose run --rm --entrypoint sh rustfs-init -c \
@@ -353,7 +376,7 @@ docker compose run --rm --entrypoint sh rustfs-init -c \
 curl -s http://localhost:9001/iceberg/v1/namespaces/fluss/tables
 ```
 
-### Q25. tiering 作业状态去哪看？
+### Q26. tiering 作业状态去哪看？
 
 ```bash
 curl -s http://localhost:8083/jobs/overview
@@ -361,7 +384,7 @@ curl -s http://localhost:8083/jobs/overview
 
 或打开 Flink Web UI：<http://localhost:8083>，找 `Fluss Lake Tiering Service - iceberg`。
 
-### Q26. 数据写入后湖里读不到
+### Q27. 数据写入后湖里读不到
 
 按顺序排查：
 
@@ -374,18 +397,18 @@ curl -s http://localhost:8083/jobs/overview
 
 ## 六、其他
 
-### Q27. 为什么客户端 Iceberg 是 1.10.1，HMS 里是 1.9.1？
+### Q28. 为什么客户端 Iceberg 是 1.10.1，HMS 里是 1.9.1？
 
 HMS 4.1.0 镜像把 Iceberg 1.9.1 shaded 进了 `hive-iceberg-handler-4.1.0.jar`，
 无法替换。客户端（Flink、Fluss）用 1.10.1，通过 REST 协议交互，
 只要都遵循 Iceberg REST 规范即可共存——本仓库的读写链路已实测通过。
 
-### Q28. 可以换成 AWS S3 或 MinIO 吗？
+### Q29. 可以换成 AWS S3 或 MinIO 吗？
 
 可以。把 `s3.endpoint` / `fs.s3a.endpoint` 换成对应地址，
 并按需调整 `path-style-access` 和凭据配置即可，其余配置不变。
 
-### Q29. 这个栈能在生产用吗？
+### Q30. 这个栈能在生产用吗？
 
 不能直接用于生产。至少需要处理：
 
