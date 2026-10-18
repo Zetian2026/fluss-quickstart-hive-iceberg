@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<!--
+  S3 access for the Hive Metastore process itself.
+  The HMS Iceberg REST catalog creates Iceberg metadata files with HadoopFileIO,
+  so the warehouse location (s3://...) must be resolvable to a real FileSystem here.
+-->
+<configuration>
+  <!-- user request: s3 must be served by S3A, not the legacy s3:// FS -->
+  <property>
+    <name>fs.s3.impl</name>
+    <value>org.apache.hadoop.fs.s3a.S3AFileSystem</value>
+  </property>
+  <property>
+    <name>fs.s3a.impl</name>
+    <value>org.apache.hadoop.fs.s3a.S3AFileSystem</value>
+  </property>
+
+  <!--
+    Iceberg's HiveCatalog (used in-process by the HMS REST servlet) resolves the default
+    namespace/table location from these two Hadoop keys directly. The HMS-side
+    "metastore.warehouse.dir" property is NOT read by Iceberg, both must be set.
+  -->
+  <property>
+    <name>hive.metastore.warehouse.dir</name>
+    <value>s3://warehouse/</value>
+  </property>
+  <property>
+    <name>hive.metastore.warehouse.external.dir</name>
+    <value>s3://warehouse/</value>
+  </property>
+
+  <!-- RustFS endpoint -->
+  <property>
+    <name>fs.s3a.endpoint</name>
+    <value>http://rustfs:9000</value>
+  </property>
+  <!-- required by hadoop-aws 3.4.x, otherwise it tries to resolve the region via IMDS/STS -->
+  <property>
+    <name>fs.s3a.endpoint.region</name>
+    <value>us-east-1</value>
+  </property>
+  <property>
+    <name>fs.s3a.path.style.access</name>
+    <value>true</value>
+  </property>
+  <property>
+    <name>fs.s3a.connection.ssl.enabled</name>
+    <value>false</value>
+  </property>
+
+  <!-- static credentials for RustFS -->
+  <property>
+    <name>fs.s3a.access.key</name>
+    <value>rustfsadmin</value>
+  </property>
+  <property>
+    <name>fs.s3a.secret.key</name>
+    <value>rustfsadmin</value>
+  </property>
+  <property>
+    <name>fs.s3a.aws.credentials.provider</name>
+    <value>org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider</value>
+  </property>
+
+  <!-- RustFS does not implement the full S3 "directory" marker semantics -->
+  <property>
+    <name>fs.s3a.create.performance</name>
+    <value>false</value>
+  </property>
+  <property>
+    <name>fs.s3a.fast.upload.buffer</name>
+    <value>bytebuffer</value>
+  </property>
+</configuration>
